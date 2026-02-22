@@ -1,8 +1,8 @@
 import * as Configs from "~/configs/Config";
 import {getLatestConfig} from "~/configs/Config";
 import {inRange} from "~/utils/NumberUtils";
-import {DownloadRequestItem} from "~/interfaces/DownloadRequestItem";
-import {addDownload} from "~/background/actions";
+import {DownloadRequestHeaders, DownloadRequestItem} from "~/interfaces/DownloadRequestItem";
+import {addDownload, getHeadersForUrl} from "~/background/actions";
 import {run} from "~/utils/ScopeFunctions";
 import type {Tabs, WebRequest} from "webextension-polyfill";
 import browser from "webextension-polyfill";
@@ -12,27 +12,37 @@ import {InterceptedMediaResult,} from "~/linkgrabber/LinkGrabberResponse";
 
 import {OnMediaInterceptedFromRequestListener} from "~/media/OnMediaInterceptedFromRequestListener";
 import {MEDIA_BLACKLIST_URLS} from "~/media/MediaBlackList";
-import {getContentType, getContentLength} from "~/utils/HeaderUtils";
+import {getContentLength, getContentType} from "~/utils/HeaderUtils";
 import {getFileExtension, getFileFromHeaders, getFileFromUrl} from "~/utils/URLUtils";
 import {onMessage} from "webext-bridge/background";
+import _ from "lodash";
 
 type TabInfo = {
     title?: string,
     url?: string,
 }
 
+type InterceptedBrowserRequestWithResponse = {
+    request: WebRequest.OnSendHeadersDetailsType,
+    response?: WebRequest.OnHeadersReceivedDetailsType,
+    handledOnWebRequest?: boolean,
+}
+
 export abstract class DownloadLinkInterceptor {
-    protected readonly pendingRequests: Record<string, WebRequest.OnSendHeadersDetailsType | undefined> = {}
-    protected readonly responses: Record<string, WebRequest.OnHeadersReceivedDetailsType> = {}
+    protected readonly pendingRequests: Record<string, InterceptedBrowserRequestWithResponse> = {}
     private onMediaDetectedListener: OnMediaInterceptedFromRequestListener | null = null
     private tabCache: Record<number, TabInfo> = {}
 
     protected setPendingRequest(id: string, requestHeaders: WebRequest.OnSendHeadersDetailsType) {
-        this.pendingRequests[id] = requestHeaders
+        this.pendingRequests[id] = {
+            request: requestHeaders,
+        }
     }
 
     removePendingRequest(id: string) {
-        delete this.pendingRequests[id]
+        setTimeout(() => {
+            delete this.pendingRequests[id]
+        }, 20_000)
     }
 
     protected readonly newTabs: Record<number, string> = {}
@@ -124,7 +134,7 @@ export abstract class DownloadLinkInterceptor {
         return true
     }
 
-    protected shouldHandleRequestForDirectDownload(details: WebRequest.OnHeadersReceivedDetailsType): string | false {
+    protected shouldHandleRequestForDirectDownload(details: WebRequest.OnHeadersReceivedDetailsType): boolean {
         if (!(
             details.type === "main_frame"
             || details.type === "sub_frame"
@@ -163,25 +173,23 @@ export abstract class DownloadLinkInterceptor {
             return false
         }
 
-        // When auto-capture of download links is enabled, holding down the shortcut key
-        // and clicking on the download link uses the internal browser download method.
-        if (_keyName === getLatestConfig().bypassShortcut) {
+        if (this.isBypassShortcutPressed()) {
             return false
         }
 
         return this.isDirectDownloadContent(details, responseHeaders)
     }
 
+    private isBypassShortcutPressed() {
+        // When auto-capture of download links is enabled, holding down the shortcut key
+        // and clicking on the download link uses the internal browser download method.
+        return _keyName === getLatestConfig().bypassShortcut
+    }
+
     private isDirectDownloadContent(
         details: WebRequest.OnHeadersReceivedDetailsType,
         responseHeaders: Headers,
-    ): string | false {
-        if (!(
-            details.type === "main_frame"
-            || details.type === "sub_frame"
-        )) {
-            return false
-        }
+    ): boolean {
         let fileName = getFileFromHeaders(responseHeaders)
         if (fileName === null) {
             fileName = getFileFromUrl(details.url)
@@ -195,7 +203,7 @@ export abstract class DownloadLinkInterceptor {
             // console.log("capture_error",`extension is not registered`,ext)
             return false
         }
-        return fileName
+        return true
     }
 
 
@@ -308,7 +316,7 @@ export abstract class DownloadLinkInterceptor {
                 if (!request) {
                     return
                 }
-                this.checkForDirectMedia(details, request)
+                this.checkForDirectMedia(details, request.request)
             },
             {
                 types: ["media"],
@@ -324,7 +332,7 @@ export abstract class DownloadLinkInterceptor {
                 if (!request) {
                     return
                 }
-                this.checkForHLS(details, request)
+                this.checkForHLS(details, request.request)
             }, {
                 types: ["xmlhttprequest"],
                 urls: [
@@ -346,52 +354,42 @@ export abstract class DownloadLinkInterceptor {
         )
         browser.webRequest.onHeadersReceived.addListener(
             async (details) => {
-                let shouldRemoveResponseInFinallyImmediately: boolean = true
                 try {
-                    const result = this.shouldHandleRequestForDirectDownload(details);
-                    this.responses[details.requestId] = details
-                    if (result === false) {
-                        return this.passResponse()
-                    }
                     const request = this.pendingRequests[details.requestId]
                     if (request === undefined) {
                         return this.passResponse()
                     }
+                    request.response = details
+                    const result = this.shouldHandleRequestForDirectDownload(details);
+                    if (!result) {
+                        return this.passResponse()
+                    }
+                    // let the browser.download now that we handled the request here!
+                    request.handledOnWebRequest = true
                     // direct download
-                    const downloadRequestItem = this.createDirectDownloadItemFromWebRequest(request)
+                    const downloadRequestItem = this.createDirectDownloadItemFromWebRequest(request.request)
                     const requestAccepted = await this.requestAddDownload(downloadRequestItem);
                     if (requestAccepted) {
-                        if (!this.canBlockResponse()) {
-                            // in chrome, we must cancel download using downloads api
-                            // so, we must let this response be available a little
-                            // then removing it
-                            shouldRemoveResponseInFinallyImmediately = false
-                        }
-                        await this.onDownloadSendToAppSuccess(request)
+                        // if (!this.canBlockResponse()) {
+                        // in chrome, we must cancel download using downloads api
+                        // so, we must let this response be available a little
+                        // then removing it
+                        // }
+                        await this.onDownloadSendToAppSuccess(request.request)
                         // if (!isBrowserHonorRequestBlocking()){
                         //     delete cancelledBrowserDownloads[details.requestId]
                         // }
                         //cancel browser request
                         return this.cancelResponse()
                     } else {
-                        await this.onDownloadSendToAppFailed(request)
+                        await this.onDownloadSendToAppFailed(request.request)
                         // if (!isBrowserHonorRequestBlocking()){
                         //     startDownloadUsingNativeBrowser(request)
                         // }
                     }
                     return this.passResponse()
                 } finally {
-                    if (shouldRemoveResponseInFinallyImmediately) {
-                        // we not accept this url or does not need to delay its removal
-                        delete this.responses[details.requestId]
-                    } else {
-                        // we buy some time for this response
-                        // to cancel browser download in somewhere else
-                        // I think 5 sec is enough
-                        setTimeout(() => {
-                            delete this.responses[details.requestId]
-                        }, 5_000)
-                    }
+                    //
                 }
             },
             filter,
@@ -402,6 +400,104 @@ export abstract class DownloadLinkInterceptor {
                 }
                 return extra
             })
+        )
+        browser.downloads?.onCreated?.addListener(async (details) => {
+            if (!getLatestConfig().autoCaptureLinks) {
+                console.log("autoCaptureLinks is disabled")
+                return
+            }
+            // filter blob:, data: etc.
+            if (!details.url.startsWith("http")) {
+                console.log("download url not starts with http", details.url)
+                return
+            }
+            // do we have recorded its request?
+            const interceptedRequest = this
+                .getInterceptedRequestByUrl(details.url)
+            // we might already start download in webRequest so just cancell it here
+            if (interceptedRequest?.handledOnWebRequest) {
+                console.log("interceptedRequest already handled")
+                await this.cancelDownload(details.id)
+                return
+            }
+            if (interceptedRequest) {
+                // we only support GET downloads, if we recorded the request then we can check if it
+                if (interceptedRequest.request.method !== "GET") {
+                    console.log("request method is not supported", interceptedRequest?.request.method)
+                    return
+                }
+            }
+            let downloadPage: string | null
+            if (interceptedRequest) {
+                downloadPage = this.getDownloadPage(interceptedRequest.request)
+            } else {
+                downloadPage = details.referrer || null
+            }
+            if (this.isInConfigBlacklist(details.url)) {
+                return
+            }
+            if (downloadPage && this.isInConfigBlacklist(downloadPage)) {
+                return
+            }
+            // check file size minimum requirement
+            const contentLength = details.fileSize
+            if (!this.doWeAcceptThisFileSize(contentLength)) {
+                return
+            }
+            if (this.isBypassShortcutPressed()) {
+                return
+            }
+            let requestHeaders: DownloadRequestHeaders = {}
+            if (interceptedRequest) {
+                interceptedRequest.request.requestHeaders?.forEach((header) => {
+                    if (header.value) {
+                        requestHeaders[header.name] = header.value
+                    }
+                })
+            }
+            if (_.isEmpty(requestHeaders)) {
+                requestHeaders = await getHeadersForUrl(details.url) || {}
+            }
+            if (interceptedRequest?.response) {
+                const response = interceptedRequest.response
+                if (this.isInConfigBlacklist(response.originUrl || response.url)) {
+                    return
+                }
+                const responseHeaders = getHeaders(response.responseHeaders)
+                if (!this.isDirectDownloadContent(response, responseHeaders)) {
+                    return
+                }
+            }
+
+            await this.cancelDownload(details.id)
+            const item: DownloadRequestItem = {
+                link: details.url,
+                description: null,
+                downloadPage: downloadPage,
+                headers: requestHeaders,
+                suggestedName: null,
+                type: "http",
+            };
+            await this.requestAddDownload(item)
+        })
+    }
+
+    async cancelDownload(id: number) {
+        try {
+            await browser.downloads.cancel(id)
+            await browser.downloads.erase({id: id})
+            await browser.downloads.removeFile(id)
+        } catch (error) {
+
+        }
+    }
+
+
+    getInterceptedRequestByUrl(url: string) {
+        return Object.values(this.pendingRequests).find(
+            pr => {
+                return pr.request.url === url
+            }
         )
     }
 
