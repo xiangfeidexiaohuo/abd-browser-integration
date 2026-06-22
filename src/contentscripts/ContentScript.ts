@@ -3,6 +3,7 @@ import * as selectionPopup from "~/popup/selection/SelectionPopup";
 import * as MediaPopup from "~/popup/media/MediaSelectionPopup";
 import {debounce} from "~/utils/Debaunce";
 import * as mousePosition from "~/utils/MouseUtil"
+import * as HoldingKeyTracker from "~/utils/HoldingKeyTracker"
 import * as Configs from "~/configs/Config"
 import {run} from "~/utils/ScopeFunctions";
 import {onMessage} from "webext-bridge/content-script"
@@ -36,6 +37,7 @@ function shouldCreatePopup() {
 run(async () => {
     await Configs.boot()
     mousePosition.boot()
+    HoldingKeyTracker.boot()
     selectionPopup.setOnPopupClicked(async () => {
         checkAndReportLinks()
     })
@@ -66,15 +68,6 @@ run(async () => {
         showPopupDelayed.cancel()
     })
 
-    let holdingKey = ""
-    document.addEventListener("keydown", (e) => {
-        holdingKey = e.key
-    })
-
-    document.addEventListener("keyup", (e) => {
-        holdingKey = ""
-    })
-
     document.addEventListener("mouseup", () => {
         showPopupDelayed(() => {
             const mousePositionInPage = mousePosition.getMousePositionInPage();
@@ -95,13 +88,19 @@ run(async () => {
             lastSelectionConsumed = false
             selectionPopup.showAddDownloadPopupUi(mousePositionInPage)
         })
-        sendMessage('set_holding_key', holdingKey).finally(() => {
-            holdingKey = ""
+        run(async () => {
+            try {
+                await sendMessage(
+                    'set_holding_key',
+                    HoldingKeyTracker.getHoldingKey(),
+                    "background"
+                )
+            } catch (e) {
+                // ignored
+            } finally {
+                HoldingKeyTracker.clear()
+            }
         })
-    })
-
-    window.addEventListener('blur', function() {
-        holdingKey = ""
     })
 
     onMessage("show_log", (msg) => {
