@@ -9,12 +9,12 @@ import browser from "webextension-polyfill";
 import {isChrome} from "~/utils/ExtensionInfo";
 import urlMatch from "match-url-wildcard"
 import {InterceptedMediaResult,} from "~/linkgrabber/LinkGrabberResponse";
+import * as DateUtils from "~/utils/DateUtils";
 
 import {OnMediaInterceptedFromRequestListener} from "~/media/OnMediaInterceptedFromRequestListener";
 import {MEDIA_BLACKLIST_URLS} from "~/media/MediaBlackList";
 import {getContentLength, getContentType} from "~/utils/HeaderUtils";
 import {getFileExtension, getFileFromHeaders, getFileFromUrl} from "~/utils/URLUtils";
-import {onMessage} from "webext-bridge/background";
 import _ from "lodash";
 import * as BackgroundSharedState from "~/background/BackgroundSharedState";
 
@@ -409,12 +409,25 @@ export abstract class DownloadLinkInterceptor {
         )
         browser.downloads?.onCreated?.addListener(async (details) => {
             if (!getLatestConfig().autoCaptureLinks) {
-                console.log("autoCaptureLinks is disabled")
+                // console.log("autoCaptureLinks is disabled")
                 return
             }
             // filter blob:, data: etc.
             if (!details.url.startsWith("http")) {
-                console.log("download url not starts with http", details.url)
+                // console.log("download url not starts with http", details.url)
+                return
+            }
+            if (details.byExtensionId) {
+                // console.log("download is initiated by an extension", details.byExtensionName, details.byExtensionId)
+                return
+            }
+            const diffTime = DateUtils.diffTime(details.startTime, Date.now())
+            if (diffTime !== null && diffTime > 10_000) {
+                // console.log(`the download is not created now, diff is ${diffTime}ms`)
+                return
+            }
+            if (details.endTime) {
+                // console.log(`the download is already finished! at ${details.endTime}`)
                 return
             }
             // do we have recorded its request?
@@ -426,14 +439,14 @@ export abstract class DownloadLinkInterceptor {
 
             // we might already start download in webRequest so just cancel it here
             if (interceptedRequest?.handledOnWebRequest) {
-                console.log("interceptedRequest already handled")
+                // console.log("interceptedRequest already handled")
                 await this.cancelDownload(details.id)
                 return
             }
             if (interceptedRequest) {
                 // we only support GET downloads, if we recorded the request then we can check if it
                 if (interceptedRequest.finalRequest.method !== "GET") {
-                    console.log("request method is not supported", interceptedRequest?.finalRequest.method)
+                    // console.log("request method is not supported", interceptedRequest?.finalRequest.method)
                     return
                 }
                 downloadUrl = interceptedRequest.finalRequest.url
