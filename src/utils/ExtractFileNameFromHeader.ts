@@ -1,13 +1,13 @@
 import {EmailMimeWordDecoder} from "~/utils/EmailMimeWordDecoder";
 
-const utf8FilenameRegex = /filename\*=UTF-8''([\w%\-\.]+)(?:; ?|$)/i;
+const utf8FilenameRegex = /filename\*=UTF-8''([^;]+)(?:; ?|$)/i;
 const asciiFilenameRegex = /^filename=(["']?)(.*?[^\\])\1(?:; ?|$)/i;
 
 export function getFileNameFromHeader(disposition: string): string | null {
     //utf8 check
     const utf8CheckResult = utf8FilenameRegex.exec(disposition)
     if (utf8CheckResult !== null && utf8CheckResult[1]) {
-        return decodeURIComponent(utf8CheckResult[1]);
+        return decodeUriOrDefault(utf8CheckResult[1]);
     }
     // ascii check
     // prevent ReDos attacks by anchoring the ascii regex to string start and
@@ -22,8 +22,16 @@ export function getFileNameFromHeader(disposition: string): string | null {
             // for mail servers
             fileNameValue = EmailMimeWordDecoder.decode(fileNameValue)
 
-            return decodeURIComponent(fileNameValue);
+            return decodeUriOrDefault(fileNameValue);
         }
     }
     return null;
+}
+
+function decodeUriOrDefault(encodedURIComponent: string) {
+    try {
+        return decodeURIComponent(encodedURIComponent)
+    } catch (e) {
+        return encodedURIComponent
+    }
 }
