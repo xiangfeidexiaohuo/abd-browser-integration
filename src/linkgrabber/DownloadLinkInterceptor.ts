@@ -433,6 +433,11 @@ export abstract class DownloadLinkInterceptor {
             // do we have recorded its request?
             const interceptedRequest = this
                 .getInterceptedRequestByUrl(details.url)
+
+            if (!interceptedRequest && this.shouldSkipUninterceptedDownloads()) {
+                return
+            }
+
             // this will be sent to the app, might be overridden if there is a pending request related to this url
             let downloadUrl = details.url
             let downloadPage: string | null = null
@@ -502,6 +507,18 @@ export abstract class DownloadLinkInterceptor {
             };
             await this.requestAddDownload(item)
         })
+    }
+
+    private shouldSkipUninterceptedDownloads() {
+        // browser.downloads might creates download that are manually created without initial requests.
+        // for example
+        // - by the browser download ui (retry button)
+        // - websites that somehow tell browser to download something without actually sending initial requests
+        // even though skipping will ignore some downloads however it makes the extension more predictive
+        // just keeping this function for future.
+        // maybe browsers expose apis that allow me better understand who creates the download item (the browser or the website)
+
+        return true
     }
 
     async cancelDownload(id: number) {
